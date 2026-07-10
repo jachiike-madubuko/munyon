@@ -191,6 +191,19 @@ function normalizeCategories(list) {
     }));
 }
 
+function normalizeLink(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  if (/^https?:\/\//i.test(s)) return s;
+  return `https://${s}`;
+}
+
+function openItemLink(link) {
+  const href = normalizeLink(link);
+  if (!href) return;
+  window.open(href, "_blank", "noopener,noreferrer");
+}
+
 function normalizeItems(list) {
   if (!Array.isArray(list)) return [];
   return list.map((i) => ({
@@ -198,6 +211,7 @@ function normalizeItems(list) {
     categoryIds: Array.isArray(i.categoryIds) ? i.categoryIds : [],
     paid: Boolean(i.paid),
     cost: Number(i.cost) || 0,
+    link: typeof i.link === "string" ? i.link : "",
   }));
 }
 
@@ -435,31 +449,45 @@ export default function App() {
     up({ items: state.items.filter((i) => i.id !== id) });
   };
 
-  const addItem = (name, cost, pc, categoryIds = []) =>
+  const addItem = (name, cost, pc, categoryIds = [], link = "") =>
     up({
-      items: [...state.items, { id: uid(), name, cost, pc, paid: false, categoryIds }],
+      items: [
+        ...state.items,
+        { id: uid(), name, cost, pc, paid: false, categoryIds, link: normalizeLink(link) },
+      ],
     });
 
-  const editItem = (id, name, cost, categoryIds) =>
+  const editItem = (id, name, cost, categoryIds, link) =>
     up({
-      items: state.items.map((i) =>
-        i.id === id
-          ? {
-              ...i,
-              name,
-              cost,
-              categoryIds: categoryIds ?? i.categoryIds ?? [],
-            }
-          : i
-      ),
+      items: state.items.map((i) => {
+        if (i.id !== id) {
+          // keep split siblings' shared cart link in sync
+          if (
+            i.splitGroup &&
+            state.items.find((x) => x.id === id)?.splitGroup === i.splitGroup &&
+            link !== undefined
+          ) {
+            return { ...i, link: normalizeLink(link), categoryIds: categoryIds ?? i.categoryIds ?? [] };
+          }
+          return i;
+        }
+        return {
+          ...i,
+          name,
+          cost,
+          categoryIds: categoryIds ?? i.categoryIds ?? [],
+          link: link !== undefined ? normalizeLink(link) : i.link || "",
+        };
+      }),
     });
 
-  const addSplitItems = (name, cost, startPcId, splitCount, categoryIds = []) => {
+  const addSplitItems = (name, cost, startPcId, splitCount, categoryIds = [], link = "") => {
     const startIdx = state.paychecks.findIndex((p) => p.id === startPcId);
     const from = startIdx >= 0 ? startIdx : 0;
     const paychecks = ensurePaychecksFrom(state.paychecks, from, splitCount);
     const amounts = splitAmounts(cost, splitCount);
     const groupId = uid();
+    const href = normalizeLink(link);
     const newItems = amounts.map((amt, i) => ({
       id: uid(),
       name,
@@ -467,6 +495,7 @@ export default function App() {
       pc: paychecks[from + i].id,
       paid: false,
       categoryIds,
+      link: href,
       splitGroup: groupId,
       splitIndex: i + 1,
       splitOf: splitCount,
@@ -484,6 +513,7 @@ export default function App() {
     let total = item.cost;
     let baseName = item.name;
     let categoryIds = item.categoryIds || [];
+    let link = item.link || "";
     let startPc = item.pc;
     let without = state.items;
 
@@ -492,6 +522,7 @@ export default function App() {
       total = group.reduce((s, i) => s + i.cost, 0);
       baseName = item.name;
       categoryIds = item.categoryIds || [];
+      link = item.link || group.find((g) => g.link)?.link || "";
       const first = group.sort((a, b) => (a.splitIndex || 0) - (b.splitIndex || 0))[0];
       startPc = first?.pc || item.pc;
       without = state.items.filter((i) => i.splitGroup !== item.splitGroup);
@@ -504,6 +535,7 @@ export default function App() {
     const paychecks = ensurePaychecksFrom(state.paychecks, from, count);
     const amounts = splitAmounts(total, count);
     const groupId = uid();
+    const href = normalizeLink(link);
     const newItems = amounts.map((amt, i) => ({
       id: uid(),
       name: baseName,
@@ -511,6 +543,7 @@ export default function App() {
       pc: paychecks[from + i].id,
       paid: false,
       categoryIds,
+      link: href,
       splitGroup: groupId,
       splitIndex: i + 1,
       splitOf: count,
@@ -531,6 +564,7 @@ export default function App() {
       pc: item.pc,
       paid: item.paid,
       categoryIds: item.categoryIds || [],
+      link: item.link || group.find((g) => g.link)?.link || "",
     };
     const others = state.items.filter((i) => i.splitGroup !== item.splitGroup);
     up({ items: [...others, kept] });
@@ -822,8 +856,8 @@ export default function App() {
                 deleteItem(sheet.item.id);
                 setSheet(null);
               }}
-              onSave={(name, cost, categoryIds) => {
-                editItem(sheet.item.id, name, cost, categoryIds);
+              onSave={(name, cost, categoryIds, link) => {
+                editItem(sheet.item.id, name, cost, categoryIds, link);
                 setSheet(null);
               }}
               onEnableSplit={(count) => {
@@ -847,12 +881,12 @@ export default function App() {
               free={free}
               categories={categories}
               onCreateCategory={createCategory}
-              onAdd={(name, cost, categoryIds) => {
-                addItem(name, cost, sheet.pc, categoryIds);
+              onAdd={(name, cost, categoryIds, link) => {
+                addItem(name, cost, sheet.pc, categoryIds, link);
                 setSheet(null);
               }}
-              onAddSplit={(name, cost, splitCount, categoryIds) => {
-                addSplitItems(name, cost, sheet.pc, splitCount, categoryIds);
+              onAddSplit={(name, cost, splitCount, categoryIds, link) => {
+                addSplitItems(name, cost, sheet.pc, splitCount, categoryIds, link);
                 setSheet(null);
               }}
             />
@@ -1252,6 +1286,35 @@ function PaycheckCard({
                   {item.paid ? "✓" : ""}
                 </button>
 
+                {item.link ? (
+                  <button
+                    type="button"
+                    aria-label="Open cart or payment link"
+                    title="Open link"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openItemLink(item.link);
+                    }}
+                    style={{
+                      width: 36,
+                      height: 36,
+                      borderRadius: 10,
+                      flexShrink: 0,
+                      border: `1px solid ${C.line}`,
+                      background: C.cardUp,
+                      color: C.accent,
+                      fontSize: 16,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      padding: 0,
+                      fontFamily: "inherit",
+                      lineHeight: 1,
+                    }}
+                  >
+                    ↗
+                  </button>
+                ) : null}
+
                 <div
                   onClick={() => onItemTap(item)}
                   role="button"
@@ -1426,6 +1489,7 @@ function ItemSheet({
 }) {
   const [name, setName] = useState(item?.name ?? "");
   const [cost, setCost] = useState(String(item?.cost ?? ""));
+  const [link, setLink] = useState(item?.link ?? "");
   const [categoryIds, setCategoryIds] = useState(item?.categoryIds || []);
   const [splitOn, setSplitOn] = useState(Boolean(item?.splitGroup));
   const [splitCount, setSplitCount] = useState(item?.splitOf || 4);
@@ -1436,9 +1500,11 @@ function ItemSheet({
   const dirty =
     name !== item.name ||
     Number(cost) !== item.cost ||
+    (link || "") !== (item.link || "") ||
     JSON.stringify(categoryIds) !== JSON.stringify(item.categoryIds || []);
 
   const count = Math.max(2, Math.min(24, Math.floor(Number(splitCount) || 4)));
+  const hasLink = Boolean(normalizeLink(link));
 
   return (
     <div>
@@ -1459,6 +1525,26 @@ function ItemSheet({
         </div>
       )}
 
+      <div style={fieldLabel}>Cart / payment link</div>
+      <input
+        style={input}
+        value={link}
+        onChange={(e) => setLink(e.target.value)}
+        inputMode="url"
+        autoCapitalize="off"
+        autoCorrect="off"
+        placeholder="https://… paste checkout or cart URL"
+      />
+      {hasLink && (
+        <button
+          type="button"
+          style={{ ...btnGhost, width: "100%", marginTop: -2, marginBottom: 12, borderStyle: "solid" }}
+          onClick={() => openItemLink(link)}
+        >
+          Open link ↗
+        </button>
+      )}
+
       <CategoryPicker
         categories={categories}
         selectedIds={categoryIds}
@@ -1469,7 +1555,7 @@ function ItemSheet({
       {dirty && (
         <button
           style={btnPrimary}
-          onClick={() => onSave(name.trim() || item.name, Number(cost) || 0, categoryIds)}
+          onClick={() => onSave(name.trim() || item.name, Number(cost) || 0, categoryIds, link)}
         >
           Save changes
         </button>
@@ -1996,6 +2082,7 @@ function AddItemSheet({
 }) {
   const [name, setName] = useState("");
   const [cost, setCost] = useState("");
+  const [link, setLink] = useState("");
   const [splitOn, setSplitOn] = useState(false);
   const [splitCount, setSplitCount] = useState(4);
   const [categoryIds, setCategoryIds] = useState([]);
@@ -2039,6 +2126,17 @@ function AddItemSheet({
         onChange={(e) => setCost(e.target.value)}
         inputMode="decimal"
         placeholder="Cost"
+      />
+
+      <div style={fieldLabel}>Cart / payment link</div>
+      <input
+        style={input}
+        value={link}
+        onChange={(e) => setLink(e.target.value)}
+        inputMode="url"
+        autoCapitalize="off"
+        autoCorrect="off"
+        placeholder="Optional — paste checkout URL"
       />
 
       <CategoryPicker
@@ -2191,8 +2289,8 @@ function AddItemSheet({
         style={{ ...btnPrimary, opacity: canAdd ? 1 : 0.4 }}
         disabled={!canAdd}
         onClick={() => {
-          if (splitOn) onAddSplit(name.trim(), costNum, count, categoryIds);
-          else onAdd(name.trim(), costNum, categoryIds);
+          if (splitOn) onAddSplit(name.trim(), costNum, count, categoryIds, link);
+          else onAdd(name.trim(), costNum, categoryIds, link);
         }}
       >
         {splitOn ? `Split into ${count} payments` : "Add to this check"}
