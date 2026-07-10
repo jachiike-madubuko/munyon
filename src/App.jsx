@@ -10,6 +10,8 @@ import {
   CartesianGrid,
 } from "recharts";
 import AuthGate, { isUnlocked, setUnlocked } from "./AuthGate";
+import { supabaseConfigured } from "./lib/supabase";
+import { fetchPlan, savePlan } from "./lib/planSync";
 
 // ---------- constants ----------
 const STORAGE_KEY = "paycheck-planner-v2";
@@ -273,24 +275,66 @@ export default function App() {
   const saveTimer = useRef(null);
   const hydrated = useRef(false);
 
+  // Load: Supabase wins when configured; localStorage is cache / offline fallback
   useEffect(() => {
-    setState(loadState());
-    hydrated.current = true;
-  }, []);
+    if (!unlocked) return;
+    let cancelled = false;
+    hydrated.current = false;
 
+    async function hydrate() {
+      const local = loadState();
+      if (!supabaseConfigured) {
+        if (!cancelled) {
+          setState(local);
+          hydrated.current = true;
+        }
+        return;
+      }
+
+      try {
+        const cloud = await fetchPlan();
+        if (cancelled) return;
+        if (cloud) {
+          setState(cloud);
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(cloud));
+        } else {
+          setState(local);
+          // Seed cloud from local on first connect
+          await savePlan(local);
+        }
+      } catch (e) {
+        console.error("cloud load failed", e);
+        if (!cancelled) setState(local);
+      } finally {
+        if (!cancelled) hydrated.current = true;
+      }
+    }
+
+    hydrate();
+    return () => {
+      cancelled = true;
+    };
+  }, [unlocked]);
+
+  // Debounced save: local always; Supabase when configured
   useEffect(() => {
     if (!state || !hydrated.current) return;
     clearTimeout(saveTimer.current);
     setSaveStatus("saving");
-    saveTimer.current = setTimeout(() => {
+    saveTimer.current = setTimeout(async () => {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-        setSaveStatus("saved");
+        if (supabaseConfigured) {
+          await savePlan(state);
+          setSaveStatus("synced");
+        } else {
+          setSaveStatus("saved");
+        }
       } catch (e) {
         console.error("save failed", e);
         setSaveStatus("error");
       }
-    }, 400);
+    }, 500);
     return () => clearTimeout(saveTimer.current);
   }, [state]);
 
@@ -518,9 +562,11 @@ export default function App() {
       ? "Saving…"
       : saveStatus === "error"
         ? "Save failed"
-        : saveStatus === "saved"
-          ? "Saved on this phone"
-          : "";
+        : saveStatus === "synced"
+          ? "Synced to cloud"
+          : saveStatus === "saved"
+            ? "Saved on this phone"
+            : "";
 
   const lock = () => {
     setUnlocked(false);
