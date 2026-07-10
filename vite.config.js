@@ -9,12 +9,12 @@ export default defineConfig({
       registerType: "autoUpdate",
       includeAssets: ["favicon.svg", "apple-touch-icon.png"],
       manifest: {
-        name: "Paycheck Planner · Jah OS",
-        short_name: "Paychecks",
+        name: "Munyon",
+        short_name: "Munyon",
         description:
           "Plan purchases against upcoming paychecks so you never overspend a check.",
-        theme_color: "#0E1220",
-        background_color: "#0E1220",
+        theme_color: "#0A0A0A",
+        background_color: "#0A0A0A",
         display: "standalone",
         orientation: "portrait",
         start_url: "/",
