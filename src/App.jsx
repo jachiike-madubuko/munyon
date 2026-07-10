@@ -30,27 +30,54 @@ const C = {
   mute: "#8A8A8A",
 };
 
+/** Wide category palette — not red-only */
 const CAT_COLORS = [
-  "#E11D2E",
-  "#FF6B6B",
-  "#C41E3A",
-  "#FF8A80",
-  "#B71C1C",
-  "#FF5252",
-  "#D32F2F",
-  "#FF1744",
-  "#EF5350",
-  "#FFAB91",
+  "#E11D2E", // red
+  "#FF6B35", // orange
+  "#F4A261", // sand
+  "#E9C46A", // gold
+  "#2A9D8F", // teal
+  "#4CC9F0", // sky
+  "#4361EE", // blue
+  "#7B2CBF", // purple
+  "#F72585", // magenta
+  "#06D6A0", // mint
+  "#90BE6D", // green
+  "#577590", // slate
+  "#F94144", // coral red
+  "#F3722C", // tangerine
+  "#43AA8B", // sea green
+  "#277DA1", // ocean
+  "#B5179E", // orchid
+  "#FFD166", // sunflower
+  "#118AB2", // cyan
+  "#EF476F", // rose
 ];
+
+const PAY_ANCHOR = new Date(2026, 6, 15); // Jul 15, 2026 — first check; +14 days each
+
+function addDays(d, days) {
+  const next = new Date(d);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function formatPayLabel(d) {
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function paycheckLabelAt(index) {
+  return formatPayLabel(addDays(PAY_ANCHOR, index * 14));
+}
 
 const seed = {
   payAmount: 1760,
   fixed: [{ id: "f1", name: "Fixed obligations", cost: 1100 }],
   paychecks: [
-    { id: "p1", label: "Jul 10" },
-    { id: "p2", label: "Jul 24" },
-    { id: "p3", label: "Aug 7" },
-    { id: "p4", label: "Aug 21" },
+    { id: "p1", label: paycheckLabelAt(0) },
+    { id: "p2", label: paycheckLabelAt(1) },
+    { id: "p3", label: paycheckLabelAt(2) },
+    { id: "p4", label: paycheckLabelAt(3) },
   ],
   categories: [
     { id: "c1", name: "Transport", color: "#E11D2E" },
@@ -134,29 +161,8 @@ function splitAmounts(total, n) {
   return Array.from({ length: count }, (_, i) => (base + (i === count - 1 ? rem : 0)) / 100);
 }
 
-function parseLabelDate(label) {
-  if (!label) return null;
-  const withYear = Date.parse(`${label} ${new Date().getFullYear()}`);
-  if (!Number.isNaN(withYear)) return new Date(withYear);
-  const raw = Date.parse(label);
-  if (!Number.isNaN(raw)) return new Date(raw);
-  return null;
-}
-
-function formatPayLabel(d) {
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-}
-
 function nextPaycheckLabel(paychecks) {
-  for (let i = paychecks.length - 1; i >= 0; i--) {
-    const d = parseLabelDate(paychecks[i].label);
-    if (d) {
-      const next = new Date(d);
-      next.setDate(next.getDate() + 14);
-      return formatPayLabel(next);
-    }
-  }
-  return `Check ${paychecks.length + 1}`;
+  return paycheckLabelAt(paychecks.length);
 }
 
 function ensurePaychecksFrom(paychecks, startIdx, count) {
@@ -557,6 +563,20 @@ export default function App() {
 
   const saveSavings = (savings) => up({ savings: normalizeSavings(savings) });
 
+  const renamePaycheck = (id, label) => {
+    const trimmed = String(label || "").trim();
+    if (!trimmed) return;
+    up({
+      paychecks: state.paychecks.map((p) => (p.id === id ? { ...p, label: trimmed } : p)),
+    });
+  };
+
+  /** One tap: next check number + next biweekly date from Jul 15. */
+  const addPaycheck = () => {
+    const label = nextPaycheckLabel(state.paychecks);
+    up({ paychecks: [...state.paychecks, { id: uid(), label }] });
+  };
+
   const saveLabel =
     saveStatus === "saving"
       ? "Saving…"
@@ -788,13 +808,18 @@ export default function App() {
                 onPaidToggle={togglePaid}
                 onMoveUp={(id) => moveItemBySteps(id, -1)}
                 onMoveDown={(id) => moveItemBySteps(id, 1)}
+                onRename={() => setSheet({ type: "editPaycheck", id: pc.id })}
                 onFixOver={() => {
                   const firstUnpaid = pc.items.find((i) => !i.paid);
                   if (firstUnpaid) setSheet({ type: "item", item: firstUnpaid });
                 }}
               />
             ))}
-            <button onClick={() => setSheet({ type: "addPaycheck" })} style={btnGhost}>
+            <button
+              type="button"
+              onClick={addPaycheck}
+              style={btnGhost}
+            >
               + Add paycheck
             </button>
           </div>
@@ -868,10 +893,12 @@ export default function App() {
               }}
             />
           )}
-          {sheet.type === "addPaycheck" && (
-            <AddPaycheckSheet
-              onAdd={(label) => {
-                up({ paychecks: [...state.paychecks, { id: uid(), label }] });
+          {sheet.type === "editPaycheck" && (
+            <EditPaycheckSheet
+              paycheck={state.paychecks.find((p) => p.id === sheet.id)}
+              idx={state.paychecks.findIndex((p) => p.id === sheet.id)}
+              onSave={(label) => {
+                renamePaycheck(sheet.id, label);
                 setSheet(null);
               }}
             />
@@ -1211,6 +1238,7 @@ function PaycheckCard({
   onPaidToggle,
   onMoveUp,
   onMoveDown,
+  onRename,
   onFixOver,
 }) {
   const pct = free > 0 ? Math.min(100, Math.max(0, (pc.planned / free) * 100)) : pc.planned > 0 ? 100 : 0;
@@ -1227,12 +1255,40 @@ function PaycheckCard({
       }}
     >
       <div style={{ padding: "14px 16px 10px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-          <div style={{ fontWeight: 700, fontSize: 16 }}>
-            Check {idx + 1}{" "}
-            <span style={{ color: C.mute, fontWeight: 500, fontSize: 13 }}>· {pc.label}</span>
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={(e) => {
+            e.stopPropagation();
+            onRename?.();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              onRename?.();
+            }
+          }}
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 10,
+            cursor: "pointer",
+            minHeight: 48,
+            WebkitTapHighlightColor: "transparent",
+            userSelect: "none",
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 16, color: C.text }}>
+              Check {idx + 1}{" "}
+              <span style={{ color: C.accent, fontWeight: 600, fontSize: 13 }}>· {pc.label}</span>
+            </div>
+            <div style={{ marginTop: 2, fontSize: 11, color: C.mute, fontWeight: 500 }}>
+              Tap to edit date
+            </div>
           </div>
-          <div style={{ fontWeight: 800, fontSize: 16, color: over ? C.red : C.mint }}>
+          <div style={{ fontWeight: 800, fontSize: 16, color: over ? C.red : C.mint, flexShrink: 0 }}>
             {over ? "−" : ""}${fmt(Math.abs(pc.remaining))}
             <span style={{ color: C.mute, fontWeight: 500, fontSize: 11 }}> left</span>
           </div>
@@ -1749,61 +1805,92 @@ function CategoriesSheet({ categories, onSave }) {
   const [rows, setRows] = useState(() =>
     (categories || []).map((c) => ({ ...c }))
   );
+  const [pickingId, setPickingId] = useState(null);
 
   return (
     <div>
       <div style={sheetTitle}>Categories</div>
       <div style={{ fontSize: 13, color: C.mute, marginBottom: 14, lineHeight: 1.45 }}>
-        Tag purchases with one or more categories. Colors show up on the plan and Trends graph.
+        Tag purchases with one or more categories. Tap the swatch to pick from a full color set.
       </div>
 
-      {rows.map((r, idx) => (
-        <div
-          key={r.id}
-          style={{
-            display: "flex",
-            gap: 8,
-            marginBottom: 8,
-            alignItems: "center",
-          }}
-        >
-          <button
-            type="button"
-            title="Cycle color"
-            onClick={() =>
-              setRows(
-                rows.map((x) =>
-                  x.id === r.id
-                    ? { ...x, color: CAT_COLORS[(CAT_COLORS.indexOf(x.color) + 1) % CAT_COLORS.length] || CAT_COLORS[0] }
-                    : x
-                )
-              )
-            }
+      {rows.map((r) => (
+        <div key={r.id} style={{ marginBottom: 12 }}>
+          <div
             style={{
-              width: 36,
-              height: 36,
-              borderRadius: 10,
-              border: `1px solid ${C.line}`,
-              background: r.color,
-              cursor: "pointer",
-              flexShrink: 0,
+              display: "flex",
+              gap: 8,
+              alignItems: "center",
             }}
-          />
-          <input
-            style={{ ...input, marginBottom: 0, flex: 1 }}
-            value={r.name}
-            onChange={(e) =>
-              setRows(rows.map((x) => (x.id === r.id ? { ...x, name: e.target.value } : x)))
-            }
-            placeholder="Category name"
-          />
-          <button
-            onClick={() => setRows(rows.filter((x) => x.id !== r.id))}
-            style={{ ...btnGhost, padding: "0 12px", color: C.red, minWidth: 44, borderStyle: "solid" }}
-            aria-label="Remove category"
           >
-            ✕
-          </button>
+            <button
+              type="button"
+              title="Pick color"
+              onClick={() => setPickingId(pickingId === r.id ? null : r.id)}
+              style={{
+                width: 36,
+                height: 36,
+                borderRadius: 10,
+                border: `2px solid ${pickingId === r.id ? C.text : C.line}`,
+                background: r.color,
+                cursor: "pointer",
+                flexShrink: 0,
+              }}
+            />
+            <input
+              style={{ ...input, marginBottom: 0, flex: 1 }}
+              value={r.name}
+              onChange={(e) =>
+                setRows(rows.map((x) => (x.id === r.id ? { ...x, name: e.target.value } : x)))
+              }
+              placeholder="Category name"
+            />
+            <button
+              onClick={() => {
+                setRows(rows.filter((x) => x.id !== r.id));
+                if (pickingId === r.id) setPickingId(null);
+              }}
+              style={{ ...btnGhost, padding: "0 12px", color: C.red, minWidth: 44, borderStyle: "solid" }}
+              aria-label="Remove category"
+            >
+              ✕
+            </button>
+          </div>
+          {pickingId === r.id && (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 8,
+                marginTop: 10,
+                padding: 10,
+                borderRadius: 12,
+                background: C.card,
+                border: `1px solid ${C.line}`,
+              }}
+            >
+              {CAT_COLORS.map((color) => (
+                <button
+                  key={color}
+                  type="button"
+                  aria-label={`Color ${color}`}
+                  onClick={() => {
+                    setRows(rows.map((x) => (x.id === r.id ? { ...x, color } : x)));
+                    setPickingId(null);
+                  }}
+                  style={{
+                    width: 28,
+                    height: 28,
+                    borderRadius: 8,
+                    border: r.color === color ? `2px solid ${C.text}` : `1px solid ${C.line}`,
+                    background: color,
+                    cursor: "pointer",
+                    padding: 0,
+                  }}
+                />
+              ))}
+            </div>
+          )}
         </div>
       ))}
 
@@ -2412,24 +2499,32 @@ function PaySheet({ payAmount, fixed, onSave }) {
   );
 }
 
-function AddPaycheckSheet({ onAdd }) {
-  const [label, setLabel] = useState("");
+function EditPaycheckSheet({ paycheck, idx, onSave }) {
+  const [label, setLabel] = useState(paycheck?.label ?? "");
+  if (!paycheck) return null;
+  const dirty = label.trim() !== paycheck.label;
+  const checkNum = (idx >= 0 ? idx : 0) + 1;
+
   return (
     <div>
-      <div style={sheetTitle}>Add paycheck</div>
+      <div style={sheetTitle}>Edit Check {checkNum}</div>
+      <div style={{ fontSize: 13, color: C.mute, marginBottom: 12, lineHeight: 1.4 }}>
+        Change the date for Check {checkNum}. New checks auto-add on the Jul 15 + 2 weeks schedule.
+      </div>
       <input
         style={input}
         autoFocus
         value={label}
         onChange={(e) => setLabel(e.target.value)}
-        placeholder="Date label, e.g. Sep 4"
+        placeholder="e.g. Jul 15"
       />
       <button
-        style={{ ...btnPrimary, opacity: label.trim() ? 1 : 0.4 }}
-        disabled={!label.trim()}
-        onClick={() => onAdd(label.trim())}
+        type="button"
+        style={{ ...btnPrimary, opacity: label.trim() && dirty ? 1 : 0.4 }}
+        disabled={!label.trim() || !dirty}
+        onClick={() => onSave(label.trim())}
       >
-        Add paycheck
+        Save date
       </button>
     </div>
   );
