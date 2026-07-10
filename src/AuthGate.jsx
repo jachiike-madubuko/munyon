@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { supabase } from "./lib/supabase";
 
 const C = {
   bg: "#0A0A0A",
@@ -8,34 +7,47 @@ const C = {
   accent: "#E11D2E",
   text: "#F5F5F5",
   mute: "#8A8A8A",
+  red: "#FF4D4D",
 };
 
+export const PASSCODE = "jachilla3664";
+export const UNLOCK_KEY = "munyon-unlocked";
+
+export function isUnlocked() {
+  try {
+    return localStorage.getItem(UNLOCK_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function setUnlocked(value) {
+  try {
+    if (value) localStorage.setItem(UNLOCK_KEY, "1");
+    else localStorage.removeItem(UNLOCK_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 /**
- * Magic-link gate. Keeps money plans off the public URL until you sign in.
+ * Simple passcode gate for a single-user money plan on a public URL.
+ * Stays unlocked on this device until you tap Lock.
  */
-export default function AuthGate() {
-  const [email, setEmail] = useState("");
-  const [status, setStatus] = useState("idle"); // idle | sending | sent | error
+export default function AuthGate({ onUnlock }) {
+  const [code, setCode] = useState("");
   const [error, setError] = useState("");
 
-  const sendLink = async (e) => {
+  const submit = (e) => {
     e.preventDefault();
-    const trimmed = email.trim();
-    if (!trimmed) return;
-    setStatus("sending");
-    setError("");
-    const { error: err } = await supabase.auth.signInWithOtp({
-      email: trimmed,
-      options: {
-        emailRedirectTo: window.location.origin,
-      },
-    });
-    if (err) {
-      setStatus("error");
-      setError(err.message);
+    if (code.trim() !== PASSCODE) {
+      setError("Wrong passcode");
+      setCode("");
       return;
     }
-    setStatus("sent");
+    setUnlocked(true);
+    setError("");
+    onUnlock?.();
   };
 
   return (
@@ -73,102 +85,72 @@ export default function AuthGate() {
             lineHeight: 1.2,
           }}
         >
-          Your paycheck plan, locked to you
+          Enter passcode
         </h1>
         <p style={{ color: C.mute, margin: "0 0 28px", lineHeight: 1.5, fontSize: 15 }}>
-          Sign in with a magic link. No password. Your plan syncs across devices and stays private.
+          One unlock keeps this phone open. Tap Lock in the header when you want the gate back.
         </p>
 
-        {status === "sent" ? (
-          <div
+        <form onSubmit={submit}>
+          <label
             style={{
-              background: C.card,
-              border: `1px solid ${C.line}`,
-              borderRadius: 12,
-              padding: 20,
+              display: "block",
+              fontSize: 13,
+              color: C.mute,
+              marginBottom: 8,
             }}
           >
-            <div style={{ fontWeight: 600, marginBottom: 8 }}>Check your email</div>
-            <p style={{ color: C.mute, margin: 0, fontSize: 14, lineHeight: 1.5 }}>
-              We sent a link to <span style={{ color: C.text }}>{email.trim()}</span>. Open it on
-              this phone to unlock your plan.
-            </p>
-            <button
-              type="button"
-              onClick={() => setStatus("idle")}
-              style={{
-                marginTop: 16,
-                background: "transparent",
-                border: "none",
-                color: C.accent,
-                fontFamily: "inherit",
-                fontSize: 14,
-                cursor: "pointer",
-                padding: 0,
-              }}
-            >
-              Use a different email
-            </button>
-          </div>
-        ) : (
-          <form onSubmit={sendLink}>
-            <label
-              style={{
-                display: "block",
-                fontSize: 13,
-                color: C.mute,
-                marginBottom: 8,
-              }}
-            >
-              Email
-            </label>
-            <input
-              type="email"
-              autoComplete="email"
-              inputMode="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              required
-              style={{
-                width: "100%",
-                boxSizing: "border-box",
-                background: C.card,
-                border: `1px solid ${C.line}`,
-                borderRadius: 10,
-                padding: "14px 16px",
-                color: C.text,
-                fontFamily: "inherit",
-                fontSize: 16,
-                marginBottom: 16,
-                outline: "none",
-              }}
-            />
-            {error ? (
-              <p style={{ color: "#FF4D4D", fontSize: 13, margin: "0 0 12px" }}>{error}</p>
-            ) : null}
-            <button
-              type="submit"
-              disabled={status === "sending"}
-              style={{
-                width: "100%",
-                background: C.accent,
-                color: "#fff",
-                border: "none",
-                borderRadius: 10,
-                padding: "14px 16px",
-                fontFamily: "inherit",
-                fontSize: 16,
-                fontWeight: 600,
-                cursor: status === "sending" ? "wait" : "pointer",
-                opacity: status === "sending" ? 0.7 : 1,
-                minHeight: 48,
-              }}
-            >
-              {status === "sending" ? "Sending link…" : "Email me a link"}
-            </button>
-          </form>
-        )}
+            Passcode
+          </label>
+          <input
+            type="password"
+            autoComplete="current-password"
+            inputMode="text"
+            autoFocus
+            value={code}
+            onChange={(e) => {
+              setCode(e.target.value);
+              if (error) setError("");
+            }}
+            placeholder="••••••••"
+            required
+            style={{
+              width: "100%",
+              boxSizing: "border-box",
+              background: C.card,
+              border: `1px solid ${error ? C.red : C.line}`,
+              borderRadius: 10,
+              padding: "14px 16px",
+              color: C.text,
+              fontFamily: "inherit",
+              fontSize: 16,
+              marginBottom: 12,
+              outline: "none",
+              letterSpacing: "0.12em",
+            }}
+          />
+          {error ? (
+            <p style={{ color: C.red, fontSize: 13, margin: "0 0 12px" }}>{error}</p>
+          ) : null}
+          <button
+            type="submit"
+            style={{
+              width: "100%",
+              background: C.accent,
+              color: "#fff",
+              border: "none",
+              borderRadius: 10,
+              padding: "14px 16px",
+              fontFamily: "inherit",
+              fontSize: 16,
+              fontWeight: 600,
+              cursor: "pointer",
+              minHeight: 48,
+            }}
+          >
+            Unlock
+          </button>
+        </form>
       </div>
     </div>
   );

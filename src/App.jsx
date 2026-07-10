@@ -9,9 +9,7 @@ import {
   Legend,
   CartesianGrid,
 } from "recharts";
-import AuthGate from "./AuthGate";
-import { supabase, supabaseConfigured } from "./lib/supabase";
-import { fetchPlan, upsertPlan, rowToPlan } from "./lib/planSync";
+import AuthGate, { isUnlocked, setUnlocked } from "./AuthGate";
 
 // ---------- constants ----------
 const STORAGE_KEY = "paycheck-planner-v2";
@@ -265,115 +263,36 @@ function loadState() {
   }
 }
 
-function normalizePlan(parsed) {
-  if (!parsed || !Array.isArray(parsed.paychecks) || !Array.isArray(parsed.items)) {
-    return seed;
-  }
-  return {
-    payAmount: Number(parsed.payAmount) || 0,
-    fixed: Array.isArray(parsed.fixed) ? parsed.fixed : seed.fixed,
-    paychecks: parsed.paychecks,
-    items: normalizeItems(parsed.items),
-    savings: normalizeSavings(parsed.savings),
-    categories: normalizeCategories(
-      parsed.categories?.length ? parsed.categories : seed.categories
-    ),
-  };
-}
-
 // ---------- app ----------
 export default function App() {
-  const [session, setSession] = useState(undefined); // undefined = loading
+  const [unlocked, setUnlockedState] = useState(() => isUnlocked());
   const [state, setState] = useState(null);
   const [sheet, setSheet] = useState(null);
   const [tab, setTab] = useState("plan"); // plan | trends
   const [saveStatus, setSaveStatus] = useState("idle");
   const saveTimer = useRef(null);
   const hydrated = useRef(false);
-  const userId = session?.user?.id;
 
-  // Auth session
   useEffect(() => {
-    if (!supabaseConfigured) {
-      setSession(null);
-      return;
-    }
-    let alive = true;
-    supabase.auth.getSession().then(({ data }) => {
-      if (alive) setSession(data.session ?? null);
-    });
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
-      setSession(next);
-    });
-    return () => {
-      alive = false;
-      sub.subscription.unsubscribe();
-    };
+    setState(loadState());
+    hydrated.current = true;
   }, []);
 
-  // Load plan: cloud wins when signed in; migrate local → cloud on first sync
-  useEffect(() => {
-    if (session === undefined) return;
-    let cancelled = false;
-    hydrated.current = false;
-
-    async function hydrate() {
-      const local = loadState();
-
-      if (!supabaseConfigured || !session?.user?.id) {
-        if (!cancelled) {
-          setState(local);
-          hydrated.current = true;
-        }
-        return;
-      }
-
-      try {
-        const row = await fetchPlan(session.user.id);
-        if (cancelled) return;
-        if (row) {
-          const cloud = normalizePlan(rowToPlan(row));
-          setState(cloud);
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(cloud));
-        } else {
-          setState(local);
-          await upsertPlan(session.user.id, local);
-        }
-      } catch (e) {
-        console.error("cloud load failed", e);
-        if (!cancelled) setState(local);
-      } finally {
-        if (!cancelled) hydrated.current = true;
-      }
-    }
-
-    hydrate();
-    return () => {
-      cancelled = true;
-    };
-  }, [session]);
-
-  // Debounced save: local always; cloud when signed in
   useEffect(() => {
     if (!state || !hydrated.current) return;
     clearTimeout(saveTimer.current);
     setSaveStatus("saving");
-    saveTimer.current = setTimeout(async () => {
+    saveTimer.current = setTimeout(() => {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-        if (supabaseConfigured && userId) {
-          await upsertPlan(userId, state);
-          setSaveStatus("synced");
-        } else {
-          setSaveStatus("saved");
-        }
+        setSaveStatus("saved");
       } catch (e) {
         console.error("save failed", e);
         setSaveStatus("error");
       }
-    }, 500);
+    }, 400);
     return () => clearTimeout(saveTimer.current);
-  }, [state, userId]);
+  }, [state]);
 
   useEffect(() => {
     if (sheet) document.body.classList.add("sheet-open");
@@ -381,7 +300,18 @@ export default function App() {
     return () => document.body.classList.remove("sheet-open");
   }, [sheet]);
 
-  if (session === undefined || !state)
+  if (!unlocked) {
+    return (
+      <AuthGate
+        onUnlock={() => {
+          setUnlocked(true);
+          setUnlockedState(true);
+        }}
+      />
+    );
+  }
+
+  if (!state)
     return (
       <div
         style={{
@@ -397,11 +327,6 @@ export default function App() {
         Loading your plan…
       </div>
     );
-
-  // Require sign-in when Supabase is configured (public URL must not expose money map)
-  if (supabaseConfigured && !session) {
-    return <AuthGate />;
-  }
 
   const categories = state.categories || [];
   const fixedTotal = state.fixed.reduce((s, f) => s + f.cost, 0);
@@ -593,15 +518,13 @@ export default function App() {
       ? "Saving…"
       : saveStatus === "error"
         ? "Save failed"
-        : saveStatus === "synced"
-          ? "Synced"
-          : saveStatus === "saved"
-            ? "Saved on this phone"
-            : "";
+        : saveStatus === "saved"
+          ? "Saved on this phone"
+          : "";
 
-  const signOut = async () => {
-    if (!supabaseConfigured) return;
-    await supabase.auth.signOut();
+  const lock = () => {
+    setUnlocked(false);
+    setUnlockedState(false);
   };
 
   return (
@@ -640,26 +563,24 @@ export default function App() {
             >
               {saveLabel}
             </div>
-            {supabaseConfigured && session ? (
-              <button
-                type="button"
-                onClick={signOut}
-                style={{
-                  background: "transparent",
-                  border: `1px solid ${C.line}`,
-                  color: C.mute,
-                  borderRadius: 8,
-                  padding: "6px 10px",
-                  fontFamily: "inherit",
-                  fontSize: 11,
-                  fontWeight: 600,
-                  cursor: "pointer",
-                  minHeight: 32,
-                }}
-              >
-                Sign out
-              </button>
-            ) : null}
+            <button
+              type="button"
+              onClick={lock}
+              style={{
+                background: "transparent",
+                border: `1px solid ${C.line}`,
+                color: C.mute,
+                borderRadius: 8,
+                padding: "6px 10px",
+                fontFamily: "inherit",
+                fontSize: 11,
+                fontWeight: 600,
+                cursor: "pointer",
+                minHeight: 32,
+              }}
+            >
+              Lock
+            </button>
           </div>
         </div>
 
@@ -1015,6 +936,15 @@ function CategoryPicker({ categories, selectedIds, onChange, onCreate }) {
 
 // ---------- trends tab ----------
 function TrendsTab({ paychecks, categories, items, savings }) {
+  const [showSavings, setShowSavings] = useState(() => {
+    try {
+      const v = localStorage.getItem("munyon-show-savings-line");
+      return v === null ? true : v === "1";
+    } catch {
+      return true;
+    }
+  });
+
   const chartData = useMemo(() => {
     return paychecks.map((pc, idx) => {
       const row = {
@@ -1036,11 +966,82 @@ function TrendsTab({ paychecks, categories, items, savings }) {
 
   const hasCats = categories.length > 0;
   const hasSavings = (savings || []).length > 0;
+  const plotSavings = hasSavings && showSavings;
+
+  const toggleSavings = () => {
+    setShowSavings((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("munyon-show-savings-line", next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  };
 
   return (
     <div style={{ padding: "12px 14px 24px" }}>
-      <div style={{ fontSize: 13, color: C.mute, lineHeight: 1.45, marginBottom: 14 }}>
-        Spending by category across paychecks, with savings balance climbing from planned deposits.
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: 12,
+          marginBottom: 14,
+        }}
+      >
+        <div style={{ fontSize: 13, color: C.mute, lineHeight: 1.45, flex: 1 }}>
+          Spending by category across paychecks
+          {plotSavings ? ", with savings balance climbing from planned deposits." : "."}
+        </div>
+        {hasSavings && (
+          <button
+            type="button"
+            onClick={toggleSavings}
+            aria-pressed={showSavings}
+            style={{
+              flexShrink: 0,
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              background: C.card,
+              border: `1px solid ${showSavings ? "rgba(225,29,46,0.45)" : C.line}`,
+              borderRadius: 10,
+              padding: "8px 12px",
+              color: C.text,
+              fontFamily: "inherit",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+              minHeight: 40,
+            }}
+          >
+            <span
+              style={{
+                width: 36,
+                height: 20,
+                borderRadius: 10,
+                background: showSavings ? C.accent : C.line,
+                position: "relative",
+                flexShrink: 0,
+              }}
+            >
+              <span
+                style={{
+                  width: 16,
+                  height: 16,
+                  borderRadius: 8,
+                  background: showSavings ? "#fff" : C.mute,
+                  position: "absolute",
+                  top: 2,
+                  left: showSavings ? 18 : 2,
+                }}
+              />
+            </span>
+            Savings line
+          </button>
+        )}
       </div>
 
       {!hasCats && !hasSavings ? (
@@ -1103,7 +1104,7 @@ function TrendsTab({ paychecks, categories, items, savings }) {
                     activeDot={{ r: 5 }}
                   />
                 ))}
-                {hasSavings && (
+                {plotSavings && (
                   <Line
                     type="monotone"
                     dataKey="savings"
