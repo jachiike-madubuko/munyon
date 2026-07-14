@@ -10,7 +10,7 @@ import {
   CartesianGrid,
 } from "recharts";
 import AuthGate, { isUnlocked, setUnlocked } from "./AuthGate";
-import { supabaseConfigured } from "./lib/supabase";
+import { cloudConfigured } from "./lib/cloud";
 import { fetchPlan, savePlan } from "./lib/planSync";
 
 // ---------- constants ----------
@@ -281,7 +281,7 @@ export default function App() {
   const saveTimer = useRef(null);
   const hydrated = useRef(false);
 
-  // Load: Supabase wins when configured; localStorage is cache / offline fallback
+  // Load: Airtable (via /api/plan) wins when cloud is up; localStorage is cache
   useEffect(() => {
     if (!unlocked) return;
     let cancelled = false;
@@ -289,7 +289,7 @@ export default function App() {
 
     async function hydrate() {
       const local = loadState();
-      if (!supabaseConfigured) {
+      if (!cloudConfigured) {
         if (!cancelled) {
           setState(local);
           hydrated.current = true;
@@ -305,7 +305,7 @@ export default function App() {
           localStorage.setItem(STORAGE_KEY, JSON.stringify(cloud));
         } else {
           setState(local);
-          // Seed cloud from local on first connect
+          // Seed Airtable from local on first connect
           await savePlan(local);
         }
       } catch (e) {
@@ -322,7 +322,7 @@ export default function App() {
     };
   }, [unlocked]);
 
-  // Debounced save: local always; Supabase when configured
+  // Debounced save: local always; Airtable when cloud configured
   useEffect(() => {
     if (!state || !hydrated.current) return;
     clearTimeout(saveTimer.current);
@@ -330,9 +330,9 @@ export default function App() {
     saveTimer.current = setTimeout(async () => {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-        if (supabaseConfigured) {
-          await savePlan(state);
-          setSaveStatus("synced");
+        if (cloudConfigured) {
+          const ok = await savePlan(state);
+          setSaveStatus(ok ? "synced" : "saved");
         } else {
           setSaveStatus("saved");
         }
