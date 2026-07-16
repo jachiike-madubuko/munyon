@@ -575,7 +575,9 @@ export default function App() {
     state.savingsPlacements || {}
   );
 
-  const pcData = state.paychecks.map((pc, idx) => {
+  // Leftover (positive remaining) rolls into the next check's available budget.
+  let carryIn = 0;
+  const pcData = state.paychecks.map((pc) => {
     const userItems = state.items.filter((i) => i.pc === pc.id);
     const savingsItems = savingsByPc[pc.id] || [];
     const items = [...savingsItems, ...userItems];
@@ -583,7 +585,9 @@ export default function App() {
     const unpaid = items.filter((i) => !i.paid && !i.isSavings).reduce((s, i) => s + i.cost, 0);
     const paidCount = userItems.filter((i) => i.paid).length;
     const savingsTotal = savingsItems.reduce((s, i) => s + i.cost, 0);
-    return {
+    const available = free + carryIn;
+    const remaining = available - planned;
+    const row = {
       ...pc,
       items,
       userItems,
@@ -592,15 +596,20 @@ export default function App() {
       unpaid,
       paidCount,
       savingsTotal,
-      remaining: free - planned,
+      carryIn,
+      available,
+      remaining,
     };
+    carryIn = Math.max(0, remaining);
+    return row;
   });
 
   const totalPlanned = pcData.reduce((s, pc) => s + pc.planned, 0);
   const totalUnpaid = state.items.filter((i) => !i.paid).reduce((s, i) => s + i.cost, 0);
   const overChecks = pcData.filter((pc) => pc.remaining < 0);
   const onTrack = overChecks.length === 0;
-  const totalLeft = pcData.reduce((s, pc) => s + Math.max(0, pc.remaining), 0);
+  // With roll-forward, unassigned cash lives in the final check's leftover
+  const totalLeft = Math.max(0, pcData[pcData.length - 1]?.remaining ?? 0);
 
   const up = (patch) => setState((s) => ({ ...s, ...patch }));
 
@@ -992,7 +1001,7 @@ export default function App() {
               </div>
               <div style={{ marginTop: 4, fontSize: 13, color: C.mute, lineHeight: 1.4 }}>
                 {onTrack
-                  ? `$${fmt(totalLeft)} still unassigned across upcoming checks · $${fmt(totalUnpaid)} left to buy`
+                  ? `$${fmt(totalLeft)} left after the last check (leftovers roll forward) · $${fmt(totalUnpaid)} left to buy`
                   : `Move or trim purchases until every check shows green. Over by $${fmt(
                       overChecks.reduce((s, pc) => s + Math.abs(pc.remaining), 0)
                     )} total.`}
@@ -1568,7 +1577,13 @@ function PaycheckCard({
   onFixOver,
   onBackpay,
 }) {
-  const pct = free > 0 ? Math.min(100, Math.max(0, (pc.planned / free) * 100)) : pc.planned > 0 ? 100 : 0;
+  const available = pc.available != null ? pc.available : free;
+  const pct =
+    available > 0
+      ? Math.min(100, Math.max(0, (pc.planned / available) * 100))
+      : pc.planned > 0
+        ? 100
+        : 0;
   const over = pc.remaining < 0;
   const empty = (pc.userItems || pc.items.filter((i) => !i.isSavings)).length === 0 && !(pc.savingsItems || []).length;
 
@@ -1645,6 +1660,7 @@ function PaycheckCard({
             </div>
             <div style={{ marginTop: 2, fontSize: 11, color: C.mute, fontWeight: 500 }}>
               Tap header to {collapsed ? "expand" : "collapse"} · tap date to edit
+              {pc.carryIn > 0 ? ` · +$${fmt(pc.carryIn)} carried in` : ""}
               {pc.savingsTotal > 0 ? ` · $${fmt(pc.savingsTotal)} savings` : ""}
             </div>
           </div>
@@ -1666,8 +1682,10 @@ function PaycheckCard({
           />
         </div>
         <div style={{ marginTop: 6, fontSize: 11, color: C.mute }}>
-          ${fmt(pc.planned)} of ${fmt(free)} allocated
+          ${fmt(pc.planned)} of ${fmt(available)} available
+          {pc.carryIn > 0 ? ` (incl. $${fmt(pc.carryIn)} carried)` : ""}
           {pc.unpaid > 0 ? ` · $${fmt(pc.unpaid)} still to buy` : pc.paidCount ? " · purchases marked paid" : ""}
+          {!over && pc.remaining > 0 ? ` · rolls to next` : ""}
         </div>
 
         {over && (
