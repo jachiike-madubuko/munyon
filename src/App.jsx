@@ -174,9 +174,45 @@ const fmt = (n) =>
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
-function splitAmounts(total, n) {
+/**
+ * Split total into N payments.
+ * If firstPayment is set (Klarna-style), payment 1 uses that amount and
+ * the remainder is split evenly across the other N-1 payments.
+ * Rounding slack lands on the last payment.
+ */
+function splitAmounts(total, n, firstPayment) {
   const count = Math.max(1, Math.floor(n));
   const cents = Math.round(Number(total) * 100);
+  if (count <= 1) return [cents / 100];
+
+  const hasFirst =
+    firstPayment !== undefined &&
+    firstPayment !== null &&
+    firstPayment !== "" &&
+    Number.isFinite(Number(firstPayment)) &&
+    Number(firstPayment) > 0;
+
+  if (hasFirst) {
+    // Leave at least 1¢ for each remaining installment
+    const minFirst = 1;
+    const maxFirst = Math.max(minFirst, cents - (count - 1));
+    const firstCents = Math.min(
+      maxFirst,
+      Math.max(minFirst, Math.round(Number(firstPayment) * 100))
+    );
+    const rest = cents - firstCents;
+    const restCount = count - 1;
+    const base = Math.floor(rest / restCount);
+    const rem = rest - base * restCount;
+    return [
+      firstCents / 100,
+      ...Array.from(
+        { length: restCount },
+        (_, i) => (base + (i === restCount - 1 ? rem : 0)) / 100
+      ),
+    ];
+  }
+
   const base = Math.floor(cents / count);
   const rem = cents - base * count;
   return Array.from({ length: count }, (_, i) => (base + (i === count - 1 ? rem : 0)) / 100);
@@ -604,13 +640,14 @@ export default function App() {
     splitCount,
     categoryIds = [],
     link = "",
-    cadence = "biweekly"
+    cadence = "biweekly",
+    firstPayment
   ) => {
     const startIdx = state.paychecks.findIndex((p) => p.id === startPcId);
     const from = startIdx >= 0 ? startIdx : 0;
     const step = cadenceStep(cadence);
     const paychecks = ensurePaychecksFrom(state.paychecks, from, splitCount, cadence);
-    const amounts = splitAmounts(cost, splitCount);
+    const amounts = splitAmounts(cost, splitCount, firstPayment);
     const groupId = uid();
     const href = normalizeLink(link);
     const newItems = amounts.map((amt, i) => ({
@@ -629,8 +666,8 @@ export default function App() {
     up({ paychecks, items: [...state.items, ...newItems] });
   };
 
-  /** Convert an existing expense into N equal payments starting at its check. */
-  const enableSplitOnItem = (itemId, splitCount, cadence = "biweekly") => {
+  /** Convert an existing expense into N payments starting at its check (Klarna first payment optional). */
+  const enableSplitOnItem = (itemId, splitCount, cadence = "biweekly", firstPayment) => {
     const item = state.items.find((i) => i.id === itemId);
     if (!item) return;
     const count = Math.max(2, Math.min(24, Math.floor(splitCount) || 4));
@@ -660,7 +697,7 @@ export default function App() {
     const startIdx = state.paychecks.findIndex((p) => p.id === startPc);
     const from = startIdx >= 0 ? startIdx : 0;
     const paychecks = ensurePaychecksFrom(state.paychecks, from, count, cad);
-    const amounts = splitAmounts(total, count);
+    const amounts = splitAmounts(total, count, firstPayment);
     const groupId = uid();
     const href = normalizeLink(link);
     const newItems = amounts.map((amt, i) => ({
@@ -1040,8 +1077,8 @@ export default function App() {
                 editItem(sheet.item.id, name, cost, categoryIds, link);
                 setSheet(null);
               }}
-              onEnableSplit={(count, cadence) => {
-                enableSplitOnItem(sheet.item.id, count, cadence);
+              onEnableSplit={(count, cadence, firstPayment) => {
+                enableSplitOnItem(sheet.item.id, count, cadence, firstPayment);
                 setSheet(null);
               }}
               onDisableSplit={() => {
@@ -1050,6 +1087,25 @@ export default function App() {
               }}
               onCreateCategory={createCategory}
               onSaveCategories={saveCategories}
+              groupTotal={
+                (() => {
+                  const cur = state.items.find((i) => i.id === sheet.item.id);
+                  if (!cur?.splitGroup) return undefined;
+                  return state.items
+                    .filter((i) => i.splitGroup === cur.splitGroup)
+                    .reduce((s, i) => s + i.cost, 0);
+                })()
+              }
+              initialFirstPayment={
+                (() => {
+                  const cur = state.items.find((i) => i.id === sheet.item.id);
+                  if (!cur?.splitGroup) return undefined;
+                  const first = state.items
+                    .filter((i) => i.splitGroup === cur.splitGroup)
+                    .sort((a, b) => (a.splitIndex || 0) - (b.splitIndex || 0))[0];
+                  return first?.cost;
+                })()
+              }
             />
           )}
           {sheet.type === "addItem" && (
@@ -1065,8 +1121,17 @@ export default function App() {
                 addItem(name, cost, sheet.pc, categoryIds, link);
                 setSheet(null);
               }}
-              onAddSplit={(name, cost, splitCount, categoryIds, link, cadence) => {
-                addSplitItems(name, cost, sheet.pc, splitCount, categoryIds, link, cadence);
+              onAddSplit={(name, cost, splitCount, categoryIds, link, cadence, firstPayment) => {
+                addSplitItems(
+                  name,
+                  cost,
+                  sheet.pc,
+                  splitCount,
+                  categoryIds,
+                  link,
+                  cadence,
+                  firstPayment
+                );
                 setSheet(null);
               }}
             />
@@ -1874,6 +1939,8 @@ function ItemSheet({
   onEnableSplit,
   onDisableSplit,
   onCreateCategory,
+  groupTotal,
+  initialFirstPayment,
 }) {
   const [name, setName] = useState(item?.name ?? "");
   const [cost, setCost] = useState(String(item?.cost ?? ""));
@@ -1883,6 +1950,11 @@ function ItemSheet({
   const [splitCount, setSplitCount] = useState(item?.splitOf || 4);
   const [splitCadence, setSplitCadence] = useState(
     item?.splitCadence === "monthly" ? "monthly" : "biweekly"
+  );
+  const [firstPayment, setFirstPayment] = useState(() =>
+    initialFirstPayment != null && Number(initialFirstPayment) > 0
+      ? String(initialFirstPayment)
+      : ""
   );
 
   if (!item) return null;
@@ -1896,6 +1968,14 @@ function ItemSheet({
 
   const count = Math.max(2, Math.min(24, Math.floor(Number(splitCount) || 4)));
   const hasLink = Boolean(normalizeLink(link));
+  const splitTotal = isSplit
+    ? Number(groupTotal) || 0
+    : Number(cost) || item.cost || 0;
+  const firstPayNum = firstPayment === "" ? undefined : Number(firstPayment);
+  const splitPreviewAmounts =
+    (splitOn || isSplit) && splitTotal > 0
+      ? splitAmounts(splitTotal, count, firstPayNum)
+      : [];
 
   return (
     <div>
@@ -1986,7 +2066,7 @@ function ItemSheet({
           <div style={{ fontSize: 12, color: C.mute, marginTop: 2 }}>
             {isSplit
               ? "On — turn off to keep this one and remove the other payments"
-              : "Split this purchase across upcoming checks"}
+              : "Klarna-style: set 1st payment, rest auto-split"}
           </div>
         </div>
         <div
@@ -2051,9 +2131,57 @@ function ItemSheet({
               +
             </button>
           </div>
+          <div style={fieldLabel}>1st payment (Klarna)</div>
+          <input
+            style={input}
+            value={firstPayment}
+            onChange={(e) => setFirstPayment(e.target.value)}
+            inputMode="decimal"
+            placeholder={
+              splitTotal > 0
+                ? `e.g. larger first — leave blank for equal (~$${fmt(splitTotal / count)})`
+                : "Larger first payment amount"
+            }
+          />
+          <div style={{ fontSize: 12, color: C.mute, marginTop: -6, marginBottom: 10, lineHeight: 1.4 }}>
+            Remaining {count - 1} payments are calculated from the rest of the total.
+          </div>
+          {splitPreviewAmounts.length > 0 && (
+            <div
+              style={{
+                padding: "12px 14px",
+                borderRadius: 12,
+                background: "rgba(91,217,164,0.08)",
+                border: "1px solid rgba(91,217,164,0.28)",
+                fontSize: 13,
+                color: C.mute,
+                lineHeight: 1.45,
+                marginBottom: 10,
+              }}
+            >
+              <div style={{ color: C.text, fontWeight: 700, marginBottom: 6 }}>
+                1st ${fmt(splitPreviewAmounts[0])}
+                {count > 1
+                  ? ` · then ${count - 1}× ~$${fmt(splitPreviewAmounts[1] || 0)}`
+                  : ""}
+              </div>
+              {splitPreviewAmounts.map((amt, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span>Payment {i + 1}</span>
+                  <span style={{ color: C.text, fontWeight: 600 }}>${fmt(amt)}</span>
+                </div>
+              ))}
+            </div>
+          )}
           <button
             style={btnPrimary}
-            onClick={() => onEnableSplit(count, splitCadence)}
+            onClick={() =>
+              onEnableSplit(
+                count,
+                splitCadence,
+                firstPayment === "" ? undefined : Number(firstPayment)
+              )
+            }
           >
             {isSplit ? `Resplit into ${count} payments` : `Split into ${count} payments`}
           </button>
@@ -2541,12 +2669,15 @@ function AddItemSheet({
   const [splitOn, setSplitOn] = useState(false);
   const [splitCount, setSplitCount] = useState(4);
   const [splitCadence, setSplitCadence] = useState("biweekly");
+  const [firstPayment, setFirstPayment] = useState("");
   const [categoryIds, setCategoryIds] = useState([]);
 
   const costNum = Number(cost) || 0;
   const count = Math.max(2, Math.min(24, Math.floor(Number(splitCount) || 4)));
   const step = cadenceStep(splitCadence);
-  const amounts = splitOn && costNum > 0 ? splitAmounts(costNum, count) : [];
+  const firstPayNum = firstPayment === "" ? undefined : Number(firstPayment);
+  const amounts =
+    splitOn && costNum > 0 ? splitAmounts(costNum, count, firstPayNum) : [];
   const after = remaining - (splitOn ? amounts[0] || 0 : costNum);
   const canAdd = name.trim() && costNum > 0;
 
@@ -2626,7 +2757,7 @@ function AddItemSheet({
         <div style={{ textAlign: "left" }}>
           <div style={{ fontSize: 15, fontWeight: 600 }}>Split payment</div>
           <div style={{ fontSize: 12, color: C.mute, marginTop: 2 }}>
-            Equal chunks across upcoming checks
+            Klarna-style: set 1st payment, rest auto-split
           </div>
         </div>
         <div
@@ -2692,7 +2823,23 @@ function AddItemSheet({
             </button>
           </div>
 
-          {costNum > 0 && (
+          <div style={fieldLabel}>1st payment (Klarna)</div>
+          <input
+            style={input}
+            value={firstPayment}
+            onChange={(e) => setFirstPayment(e.target.value)}
+            inputMode="decimal"
+            placeholder={
+              costNum > 0
+                ? `Larger first — blank = equal (~$${fmt(costNum / count)})`
+                : "Larger first payment amount"
+            }
+          />
+          <div style={{ fontSize: 12, color: C.mute, marginTop: -6, marginBottom: 10, lineHeight: 1.4 }}>
+            The other {count - 1} payments share whatever is left.
+          </div>
+
+          {costNum > 0 && amounts.length > 0 && (
             <div
               style={{
                 padding: "12px 14px",
@@ -2705,10 +2852,8 @@ function AddItemSheet({
               }}
             >
               <div style={{ color: C.text, fontWeight: 700, marginBottom: 6 }}>
-                {count} payments of ~${fmt(amounts[0])}
-                {amounts.length > 1 && amounts[0] !== amounts[amounts.length - 1]
-                  ? ` (last $${fmt(amounts[amounts.length - 1])})`
-                  : ""}
+                1st ${fmt(amounts[0])}
+                {count > 1 ? ` · then ${count - 1}× ~$${fmt(amounts[1] || 0)}` : ""}
                 {splitCadence === "monthly" ? " · monthly cadence" : ""}
               </div>
               {splitPreview.map((p, i) => (
@@ -2759,8 +2904,17 @@ function AddItemSheet({
         style={{ ...btnPrimary, opacity: canAdd ? 1 : 0.4 }}
         disabled={!canAdd}
         onClick={() => {
-          if (splitOn) onAddSplit(name.trim(), costNum, count, categoryIds, link, splitCadence);
-          else onAdd(name.trim(), costNum, categoryIds, link);
+          if (splitOn) {
+            onAddSplit(
+              name.trim(),
+              costNum,
+              count,
+              categoryIds,
+              link,
+              splitCadence,
+              firstPayment === "" ? undefined : Number(firstPayment)
+            );
+          } else onAdd(name.trim(), costNum, categoryIds, link);
         }}
       >
         {splitOn ? `Split into ${count} payments` : "Add to this check"}
