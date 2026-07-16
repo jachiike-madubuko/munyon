@@ -251,21 +251,56 @@ function normalizeSavings(list) {
     }));
 }
 
-/** Savings deposits that hit this paycheck index (0-based). */
-function savingsForCheckIndex(savings, pcIndex) {
-  return (savings || [])
+function savingsPlacementKey(savingsId, sourceIndex) {
+  return `${savingsId}:${sourceIndex}`;
+}
+
+function parseSavingsItemId(id) {
+  const m = /^sav:(.+):(\d+)$/.exec(String(id || ""));
+  if (!m) return null;
+  return { savingsId: m[1], sourceIndex: Number(m[2]) };
+}
+
+function normalizeSavingsPlacements(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof k === "string" && typeof v === "string" && k && v) out[k] = v;
+  }
+  return out;
+}
+
+/** Build virtual savings deposit rows, honoring per-occurrence paycheck moves. */
+function buildSavingsItemsByPaycheck(savings, paychecks, placements = {}) {
+  const byPc = Object.fromEntries((paychecks || []).map((p) => [p.id, []]));
+  const pcIds = new Set((paychecks || []).map((p) => p.id));
+
+  (savings || [])
     .filter((s) => s.deposit > 0)
-    .filter((s) => (s.frequency === "monthly" ? pcIndex % 2 === 0 : true))
-    .map((s) => ({
-      id: `sav:${s.id}:${pcIndex}`,
-      name: `Save · ${s.name}`,
-      cost: Number(s.deposit) || 0,
-      paid: false,
-      categoryIds: [],
-      link: "",
-      isSavings: true,
-      savingsId: s.id,
-    }));
+    .forEach((bucket) => {
+      (paychecks || []).forEach((pc, pcIndex) => {
+        const hits = bucket.frequency === "monthly" ? pcIndex % 2 === 0 : true;
+        if (!hits) return;
+        const key = savingsPlacementKey(bucket.id, pcIndex);
+        const override = placements[key];
+        const targetPcId = override && pcIds.has(override) ? override : pc.id;
+        if (!byPc[targetPcId]) byPc[targetPcId] = [];
+        byPc[targetPcId].push({
+          id: `sav:${bucket.id}:${pcIndex}`,
+          name: `Save · ${bucket.name}`,
+          cost: Number(bucket.deposit) || 0,
+          paid: false,
+          categoryIds: [],
+          link: "",
+          isSavings: true,
+          savingsId: bucket.id,
+          savingsSourceIndex: pcIndex,
+          pc: targetPcId,
+        });
+      });
+    });
+
+  return byPc;
 }
 
 function normalizeCategories(list) {
@@ -398,6 +433,7 @@ function hydratePlan(parsed) {
     paychecks: parsed.paychecks,
     items: normalizeItems(parsed.items),
     savings: normalizeSavings(parsed.savings),
+    savingsPlacements: normalizeSavingsPlacements(parsed.savingsPlacements),
     categories: normalizeCategories(
       parsed.categories?.length ? parsed.categories : seed.categories
     ),
@@ -533,10 +569,15 @@ export default function App() {
   const categories = state.categories || [];
   const fixedTotal = state.fixed.reduce((s, f) => s + f.cost, 0);
   const free = state.payAmount - fixedTotal;
+  const savingsByPc = buildSavingsItemsByPaycheck(
+    state.savings,
+    state.paychecks,
+    state.savingsPlacements || {}
+  );
 
   const pcData = state.paychecks.map((pc, idx) => {
     const userItems = state.items.filter((i) => i.pc === pc.id);
-    const savingsItems = savingsForCheckIndex(state.savings, idx);
+    const savingsItems = savingsByPc[pc.id] || [];
     const items = [...savingsItems, ...userItems];
     const planned = items.reduce((s, i) => s + i.cost, 0);
     const unpaid = items.filter((i) => !i.paid && !i.isSavings).reduce((s, i) => s + i.cost, 0);
@@ -578,7 +619,30 @@ export default function App() {
   const moveItem = (id, pc) =>
     up({ items: state.items.map((i) => (i.id === id ? { ...i, pc } : i)) });
 
+  const moveSavingsBySteps = (id, delta) => {
+    const parsed = parseSavingsItemId(id);
+    if (!parsed) return;
+    const { savingsId, sourceIndex } = parsed;
+    const key = savingsPlacementKey(savingsId, sourceIndex);
+    const placements = state.savingsPlacements || {};
+    const naturalPcId = state.paychecks[sourceIndex]?.id;
+    const currentPcId = placements[key] || naturalPcId;
+    const idx = state.paychecks.findIndex((p) => p.id === currentPcId);
+    if (idx < 0) return;
+    const target = idx + delta;
+    if (target < 0 || target >= state.paychecks.length) return;
+    const nextPcId = state.paychecks[target].id;
+    const next = { ...placements };
+    if (nextPcId === naturalPcId) delete next[key];
+    else next[key] = nextPcId;
+    up({ savingsPlacements: next });
+  };
+
   const moveItemBySteps = (id, delta) => {
+    if (String(id).startsWith("sav:")) {
+      moveSavingsBySteps(id, delta);
+      return;
+    }
     const item = state.items.find((i) => i.id === id);
     if (!item) return;
     const idx = state.paychecks.findIndex((p) => p.id === item.pc);
@@ -1801,7 +1865,7 @@ function PaycheckCard({
                   </div>
                   {item.isSavings ? (
                     <div style={{ fontSize: 10, fontWeight: 600, color: C.mint }}>
-                      Auto savings deposit
+                      Savings deposit · use ▲ ▼ to move checks
                     </div>
                   ) : cats.length > 0 ? (
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
@@ -1822,7 +1886,6 @@ function PaycheckCard({
                   ) : null}
                 </div>
 
-                {!item.isSavings && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 2, flexShrink: 0 }}>
                   <button
                     type="button"
@@ -1843,7 +1906,6 @@ function PaycheckCard({
                     ▼
                   </button>
                 </div>
-                )}
               </div>
             );
           })
