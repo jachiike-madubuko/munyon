@@ -427,15 +427,27 @@ function hydratePlan(parsed) {
   if (!parsed || !Array.isArray(parsed.paychecks) || !Array.isArray(parsed.items)) {
     return null;
   }
+  const dedupe = (rows) => {
+    if (!Array.isArray(rows)) return [];
+    const seen = new Set();
+    const out = [];
+    for (const row of rows) {
+      const id = String(row?.id || "");
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push(row);
+    }
+    return out;
+  };
   return {
     payAmount: Number(parsed.payAmount) || 0,
-    fixed: Array.isArray(parsed.fixed) ? parsed.fixed : seed.fixed,
-    paychecks: parsed.paychecks,
-    items: normalizeItems(parsed.items),
-    savings: normalizeSavings(parsed.savings),
+    fixed: Array.isArray(parsed.fixed) ? dedupe(parsed.fixed) : seed.fixed,
+    paychecks: dedupe(parsed.paychecks),
+    items: normalizeItems(dedupe(parsed.items)),
+    savings: normalizeSavings(dedupe(parsed.savings)),
     savingsPlacements: normalizeSavingsPlacements(parsed.savingsPlacements),
     categories: normalizeCategories(
-      parsed.categories?.length ? parsed.categories : seed.categories
+      parsed.categories?.length ? dedupe(parsed.categories) : seed.categories
     ),
   };
 }
@@ -457,6 +469,7 @@ export default function App() {
   const [sheet, setSheet] = useState(null);
   const [tab, setTab] = useState("plan"); // plan | trends
   const [saveStatus, setSaveStatus] = useState("idle");
+  const [saveError, setSaveError] = useState("");
   const [collapsed, setCollapsed] = useState(() => {
     try {
       const raw = localStorage.getItem("munyon-collapsed-checks");
@@ -515,18 +528,21 @@ export default function App() {
     if (!state || !hydrated.current) return;
     clearTimeout(saveTimer.current);
     setSaveStatus("saving");
+    setSaveError("");
     saveTimer.current = setTimeout(async () => {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
         if (cloudConfigured) {
           const ok = await savePlan(state);
           setSaveStatus(ok ? "synced" : "saved");
+          setSaveError("");
         } else {
           setSaveStatus("saved");
         }
       } catch (e) {
         console.error("save failed", e);
         setSaveStatus("error");
+        setSaveError(e?.message || "Cloud save failed");
       }
     }, 500);
     return () => clearTimeout(saveTimer.current);
@@ -870,7 +886,9 @@ export default function App() {
     saveStatus === "saving"
       ? "Saving…"
       : saveStatus === "error"
-        ? "Save failed"
+        ? saveError
+          ? `Save failed: ${saveError}`
+          : "Save failed"
         : saveStatus === "synced"
           ? "Synced to cloud"
           : saveStatus === "saved"
