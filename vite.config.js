@@ -7,7 +7,13 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: "autoUpdate",
-      includeAssets: ["favicon.svg", "apple-touch-icon.png"],
+      includeAssets: [
+        "favicon.svg",
+        "favicon-32.png",
+        "apple-touch-icon.png",
+        "pwa-192.png",
+        "pwa-512.png",
+      ],
       manifest: {
         name: "Munyon",
         short_name: "Munyon",
