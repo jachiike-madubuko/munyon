@@ -54,7 +54,7 @@ const CAT_COLORS = [
   "#EF476F", // rose
 ];
 
-const PAY_ANCHOR = new Date(2026, 6, 15); // Jul 15, 2026 — first check; +14 days each
+const PAY_ANCHOR = new Date(2026, 6, 10); // Jul 10, 2026 — first check; +14 days each
 
 function addDays(d, days) {
   const next = new Date(d);
@@ -95,10 +95,10 @@ const seed = {
   payAmount: 1760,
   fixed: [{ id: "f1", name: "Fixed obligations", cost: 1100 }],
   paychecks: [
-    { id: "p1", label: paycheckLabelAt(0) },
-    { id: "p2", label: paycheckLabelAt(1) },
-    { id: "p3", label: paycheckLabelAt(2) },
-    { id: "p4", label: paycheckLabelAt(3) },
+    { id: "p1", label: "Jul 10" },
+    { id: "p2", label: "Jul 24" },
+    { id: "p3", label: "Aug 7" },
+    { id: "p4", label: "Aug 21" },
   ],
   categories: [
     { id: "c1", name: "Transport", color: "#E11D2E" },
@@ -110,7 +110,7 @@ const seed = {
     { id: "i1", name: "E-bike", cost: 300, pc: "p1", paid: false, categoryIds: ["c1"] },
     {
       id: "i2",
-      name: "Phone pay off",
+      name: "Phone pay off 1/4",
       cost: 150,
       pc: "p1",
       paid: false,
@@ -127,7 +127,7 @@ const seed = {
     { id: "i8", name: "Food", cost: 100, pc: "p2", paid: false, categoryIds: ["c3"] },
     {
       id: "i9",
-      name: "Phone pay off",
+      name: "Phone pay off 2/4",
       cost: 150,
       pc: "p2",
       paid: false,
@@ -138,7 +138,7 @@ const seed = {
     },
     {
       id: "i10",
-      name: "Phone pay off",
+      name: "Phone pay off 3/4",
       cost: 150,
       pc: "p3",
       paid: false,
@@ -150,7 +150,7 @@ const seed = {
     { id: "i11", name: "Food", cost: 100, pc: "p3", paid: false, categoryIds: ["c3"] },
     {
       id: "i12",
-      name: "Phone pay off",
+      name: "Phone pay off 4/4",
       cost: 150,
       pc: "p4",
       paid: false,
@@ -161,7 +161,8 @@ const seed = {
     },
     { id: "i13", name: "Food", cost: 100, pc: "p4", paid: false, categoryIds: ["c3"] },
   ],
-  savings: [{ id: "s1", name: "Emergency fund", balance: 400, deposit: 50, borrowed: 0 }],
+  savings: [],
+  savingsPlacements: {},
 };
 
 const HORIZON_PERIODS = { 1: 2, 3: 6, 6: 13 };
