@@ -54,7 +54,7 @@ const CAT_COLORS = [
   "#EF476F", // rose
 ];
 
-const PAY_ANCHOR = new Date(2026, 6, 10); // Jul 10, 2026 — first check; +14 days each
+const PAY_ANCHOR = new Date(2026, 6, 15); // Jul 15, 2026 — first check; +14 days each
 
 function addDays(d, days) {
   const next = new Date(d);
@@ -95,10 +95,10 @@ const seed = {
   payAmount: 1760,
   fixed: [{ id: "f1", name: "Fixed obligations", cost: 1100 }],
   paychecks: [
-    { id: "p1", label: "Jul 10" },
-    { id: "p2", label: "Jul 24" },
-    { id: "p3", label: "Aug 7" },
-    { id: "p4", label: "Aug 21" },
+    { id: "p1", label: "Jul 15" },
+    { id: "p2", label: "Jul 29" },
+    { id: "p3", label: "Aug 12" },
+    { id: "p4", label: "Aug 26" },
   ],
   categories: [
     { id: "c1", name: "Transport", color: "#E11D2E" },
