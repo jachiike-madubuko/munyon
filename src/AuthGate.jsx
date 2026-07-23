@@ -10,7 +10,7 @@ const C = {
   red: "#FF4D4D",
 };
 
-export const PASSCODE = "jachilla3664";
+export const PASSCODE = "3664";
 export const UNLOCK_KEY = "munyon-unlocked";
 
 export function isUnlocked() {
