@@ -163,6 +163,7 @@ const seed = {
   ],
   savings: [],
   savingsPlacements: {},
+  savingsSkipped: [],
 };
 
 const HORIZON_PERIODS = { 1: 2, 3: 6, 6: 13 };
@@ -266,23 +267,84 @@ function normalizeSavingsPlacements(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
   const out = {};
   for (const [k, v] of Object.entries(raw)) {
+    if (k === "v" || k === "placements" || k === "skipped") continue;
     if (typeof k === "string" && typeof v === "string" && k && v) out[k] = v;
   }
   return out;
 }
 
-/** Build virtual savings deposit rows, honoring per-occurrence paycheck moves. */
-function buildSavingsItemsByPaycheck(savings, paychecks, placements = {}) {
+function normalizeSavingsSkipped(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(String).filter(Boolean);
+}
+
+/** Pack placements + skipped into Plan Settings JSON (v2). */
+function packSavingsMeta(placements, skipped) {
+  return JSON.stringify({
+    v: 2,
+    placements: normalizeSavingsPlacements(placements),
+    skipped: normalizeSavingsSkipped(skipped),
+  });
+}
+
+/** Unpack legacy flat map or v2 { placements, skipped }. */
+function unpackSavingsMeta(raw) {
+  if (raw == null || raw === "") return { placements: {}, skipped: [] };
+  let parsed = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { placements: {}, skipped: [] };
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { placements: {}, skipped: [] };
+  }
+  if (parsed.v === 2) {
+    return {
+      placements: normalizeSavingsPlacements(parsed.placements),
+      skipped: normalizeSavingsSkipped(parsed.skipped),
+    };
+  }
+  return { placements: normalizeSavingsPlacements(parsed), skipped: [] };
+}
+
+/** Calendar month key for a paycheck label (handles 3-check months). */
+function paycheckMonthKey(pc, idx) {
+  const d = parsePayLabel(pc?.label, idx);
+  return `${d.getFullYear()}-${d.getMonth()}`;
+}
+
+/** Indexes that should receive a monthly deposit (first check of each month). */
+function monthlyDepositIndexes(paychecks) {
+  const seen = new Set();
+  const hits = new Set();
+  (paychecks || []).forEach((pc, i) => {
+    const mk = paycheckMonthKey(pc, i);
+    if (seen.has(mk)) return;
+    seen.add(mk);
+    hits.add(i);
+  });
+  return hits;
+}
+
+/** Build virtual savings deposit rows, honoring moves + skipped occurrences. */
+function buildSavingsItemsByPaycheck(savings, paychecks, placements = {}, skipped = []) {
   const byPc = Object.fromEntries((paychecks || []).map((p) => [p.id, []]));
   const pcIds = new Set((paychecks || []).map((p) => p.id));
+  const skip = new Set(normalizeSavingsSkipped(skipped));
+  const monthlyHits = monthlyDepositIndexes(paychecks);
 
   (savings || [])
     .filter((s) => s.deposit > 0)
     .forEach((bucket) => {
       (paychecks || []).forEach((pc, pcIndex) => {
-        const hits = bucket.frequency === "monthly" ? pcIndex % 2 === 0 : true;
+        const hits =
+          bucket.frequency === "monthly" ? monthlyHits.has(pcIndex) : true;
         if (!hits) return;
         const key = savingsPlacementKey(bucket.id, pcIndex);
+        if (skip.has(key)) return;
         const override = placements[key];
         const targetPcId = override && pcIds.has(override) ? override : pc.id;
         if (!byPc[targetPcId]) byPc[targetPcId] = [];
@@ -302,6 +364,56 @@ function buildSavingsItemsByPaycheck(savings, paychecks, placements = {}) {
     });
 
   return byPc;
+}
+
+/** Suggest category ids from expense name (keyword → category name). */
+function suggestCategoryIds(name, categories) {
+  const n = String(name || "").toLowerCase();
+  if (!n.trim() || !categories?.length) return [];
+  const rules = [
+    { re: /klarna|afterpay|affirm|sezzle/, needles: ["klarna"] },
+    { re: /phone|verizon|t-?mobile|att\b|mint mobile/, needles: ["phone", "tech"] },
+    { re: /instacart|grocery|food|cleaneatz|uber\s*eats|doordash/, needles: ["food"] },
+    { re: /bike|ebike|e-bike|vivo|transport|uber|lyft|gas/, needles: ["transport"] },
+    { re: /health|water bottle|vitamin|doctor|dental/, needles: ["health"] },
+    { re: /hair|root|barber/, needles: ["hair"] },
+    { re: /gym|fitness|relaxator|slackboard|workout/, needles: ["fitness", "health"] },
+    { re: /rent|housing|lease/, needles: ["rent", "housing"] },
+    { re: /amazon|tech|laptop|ipad|phone pay/, needles: ["tech"] },
+  ];
+  const ids = [];
+  for (const rule of rules) {
+    if (!rule.re.test(n)) continue;
+    for (const cat of categories) {
+      const cn = String(cat.name || "").toLowerCase();
+      if (rule.needles.some((nd) => cn.includes(nd)) && !ids.includes(cat.id)) {
+        ids.push(cat.id);
+      }
+    }
+  }
+  return ids;
+}
+
+function MetaPill({ children, color, bg }) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "3px 8px",
+        borderRadius: 999,
+        fontSize: 11,
+        fontWeight: 700,
+        letterSpacing: "0.01em",
+        color: color || C.mute,
+        background: bg || C.cardUp,
+        border: `1px solid ${C.line}`,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {children}
+    </span>
+  );
 }
 
 function normalizeCategories(list) {
@@ -443,10 +555,14 @@ function hydratePlan(parsed) {
   return {
     payAmount: Number(parsed.payAmount) || 0,
     fixed: Array.isArray(parsed.fixed) ? dedupe(parsed.fixed) : seed.fixed,
-    paychecks: dedupe(parsed.paychecks),
+    paychecks: dedupe(parsed.paychecks).map((p) => ({
+      ...p,
+      extraIncome: Number(p.extraIncome) || 0,
+    })),
     items: normalizeItems(dedupe(parsed.items)),
     savings: normalizeSavings(dedupe(parsed.savings)),
     savingsPlacements: normalizeSavingsPlacements(parsed.savingsPlacements),
+    savingsSkipped: normalizeSavingsSkipped(parsed.savingsSkipped),
     categories: normalizeCategories(
       parsed.categories?.length ? dedupe(parsed.categories) : seed.categories
     ),
@@ -589,7 +705,8 @@ export default function App() {
   const savingsByPc = buildSavingsItemsByPaycheck(
     state.savings,
     state.paychecks,
-    state.savingsPlacements || {}
+    state.savingsPlacements || {},
+    state.savingsSkipped || []
   );
 
   // Leftover (positive remaining) rolls into the next check's available budget.
@@ -602,10 +719,12 @@ export default function App() {
     const unpaid = items.filter((i) => !i.paid && !i.isSavings).reduce((s, i) => s + i.cost, 0);
     const paidCount = userItems.filter((i) => i.paid).length;
     const savingsTotal = savingsItems.reduce((s, i) => s + i.cost, 0);
-    const available = free + carryIn;
+    const extraIncome = Number(pc.extraIncome) || 0;
+    const available = free + carryIn + extraIncome;
     const remaining = available - planned;
     const row = {
       ...pc,
+      extraIncome,
       items,
       userItems,
       savingsItems,
@@ -662,6 +781,18 @@ export default function App() {
     if (nextPcId === naturalPcId) delete next[key];
     else next[key] = nextPcId;
     up({ savingsPlacements: next });
+  };
+
+  /** Remove one virtual savings deposit occurrence from the plan. */
+  const skipSavingsOccurrence = (id) => {
+    const parsed = parseSavingsItemId(id);
+    if (!parsed) return;
+    const key = savingsPlacementKey(parsed.savingsId, parsed.sourceIndex);
+    const placements = { ...(state.savingsPlacements || {}) };
+    delete placements[key];
+    const skipped = new Set(state.savingsSkipped || []);
+    skipped.add(key);
+    up({ savingsPlacements: placements, savingsSkipped: [...skipped] });
   };
 
   const moveItemBySteps = (id, delta) => {
@@ -869,11 +1000,22 @@ export default function App() {
     up({ paychecks, items: [...state.items, item] });
   };
 
-  const renamePaycheck = (id, label) => {
+  const renamePaycheck = (id, label, extraIncome) => {
     const trimmed = String(label || "").trim();
     if (!trimmed) return;
     up({
-      paychecks: state.paychecks.map((p) => (p.id === id ? { ...p, label: trimmed } : p)),
+      paychecks: state.paychecks.map((p) =>
+        p.id === id
+          ? {
+              ...p,
+              label: trimmed,
+              extraIncome:
+                extraIncome === undefined
+                  ? Number(p.extraIncome) || 0
+                  : Number(extraIncome) || 0,
+            }
+          : p
+      ),
     });
   };
 
@@ -1130,6 +1272,7 @@ export default function App() {
                   if (firstUnpaid) setSheet({ type: "item", item: firstUnpaid });
                 }}
                 onBackpay={() => backpayOver(pc.id)}
+                onSkipSavings={skipSavingsOccurrence}
               />
             ))}
             <button
@@ -1242,8 +1385,8 @@ export default function App() {
             <EditPaycheckSheet
               paycheck={state.paychecks.find((p) => p.id === sheet.id)}
               idx={state.paychecks.findIndex((p) => p.id === sheet.id)}
-              onSave={(label) => {
-                renamePaycheck(sheet.id, label);
+              onSave={(label, extraIncome) => {
+                renamePaycheck(sheet.id, label, extraIncome);
                 setSheet(null);
               }}
             />
@@ -1595,6 +1738,7 @@ function PaycheckCard({
   onRename,
   onFixOver,
   onBackpay,
+  onSkipSavings,
 }) {
   const available = pc.available != null ? pc.available : free;
   const pct =
@@ -1605,6 +1749,7 @@ function PaycheckCard({
         : 0;
   const over = pc.remaining < 0;
   const empty = (pc.userItems || pc.items.filter((i) => !i.isSavings)).length === 0 && !(pc.savingsItems || []).length;
+  const extraIncome = Number(pc.extraIncome) || 0;
 
   return (
     <div
@@ -1677,10 +1822,42 @@ function PaycheckCard({
                 {pc.label}
               </button>
             </div>
-            <div style={{ marginTop: 2, fontSize: 11, color: C.mute, fontWeight: 500 }}>
-              Tap header to {collapsed ? "expand" : "collapse"} · tap date to edit
-              {pc.carryIn > 0 ? ` · +$${fmt(pc.carryIn)} carried in` : ""}
-              {pc.savingsTotal > 0 ? ` · $${fmt(pc.savingsTotal)} savings` : ""}
+            <div
+              style={{
+                marginTop: 8,
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 6,
+              }}
+            >
+              <MetaPill color={C.text} bg={C.cardUp}>
+                ${fmt(pc.planned)}/{fmt(available)}
+              </MetaPill>
+              {pc.carryIn > 0 && (
+                <MetaPill color={C.mint} bg="rgba(91,217,164,0.12)">
+                  +${fmt(pc.carryIn)} carry
+                </MetaPill>
+              )}
+              {extraIncome > 0 && (
+                <MetaPill color="#4CC9F0" bg="rgba(76,201,240,0.12)">
+                  +${fmt(extraIncome)} income
+                </MetaPill>
+              )}
+              {pc.savingsTotal > 0 && (
+                <MetaPill color={C.mint} bg="rgba(91,217,164,0.12)">
+                  ${fmt(pc.savingsTotal)} save
+                </MetaPill>
+              )}
+              {pc.unpaid > 0 && (
+                <MetaPill color={C.accent} bg="rgba(225,29,46,0.12)">
+                  ${fmt(pc.unpaid)} unpaid
+                </MetaPill>
+              )}
+              {!over && pc.remaining > 0 && (
+                <MetaPill color={C.mute} bg={C.cardUp}>
+                  rolls
+                </MetaPill>
+              )}
             </div>
           </div>
           <div style={{ fontWeight: 800, fontSize: 16, color: over ? C.red : C.mint, flexShrink: 0 }}>
@@ -1699,12 +1876,6 @@ function PaycheckCard({
               transition: "width .3s ease",
             }}
           />
-        </div>
-        <div style={{ marginTop: 6, fontSize: 11, color: C.mute }}>
-          ${fmt(pc.planned)} of ${fmt(available)} available
-          {pc.carryIn > 0 ? ` (incl. $${fmt(pc.carryIn)} carried)` : ""}
-          {pc.unpaid > 0 ? ` · $${fmt(pc.unpaid)} still to buy` : pc.paidCount ? " · purchases marked paid" : ""}
-          {!over && pc.remaining > 0 ? ` · rolls to next` : ""}
         </div>
 
         {over && (
@@ -1902,7 +2073,7 @@ function PaycheckCard({
                   </div>
                   {item.isSavings ? (
                     <div style={{ fontSize: 10, fontWeight: 600, color: C.mint }}>
-                      Savings deposit · use ▲ ▼ to move checks
+                      Savings · ▲▼ move · ✕ remove this one
                     </div>
                   ) : cats.length > 0 ? (
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
@@ -1943,6 +2114,24 @@ function PaycheckCard({
                     ▼
                   </button>
                 </div>
+                {item.isSavings && (
+                  <button
+                    type="button"
+                    aria-label="Remove this savings deposit"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSkipSavings?.(item.id);
+                    }}
+                    style={{
+                      ...arrowBtn(false),
+                      color: C.red,
+                      borderColor: "rgba(255,77,77,0.35)",
+                      marginRight: 8,
+                    }}
+                  >
+                    ✕
+                  </button>
+                )}
               </div>
             );
           })
@@ -2451,6 +2640,25 @@ function CategoriesSheet({ categories, onSave }) {
 // ---------- savings section ----------
 function SavingsSection({ savings, onManage, onBucketTap }) {
   const list = savings || [];
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("munyon-savings-collapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  const toggle = () => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("munyon-savings-collapsed", next ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  };
 
   return (
     <div style={{ padding: "4px 14px 0" }}>
@@ -2460,19 +2668,47 @@ function SavingsSection({ savings, onManage, onBucketTap }) {
           justifyContent: "space-between",
           alignItems: "center",
           padding: "0 4px 8px",
+          gap: 8,
         }}
       >
-        <div
+        <button
+          type="button"
+          onClick={toggle}
           style={{
-            fontSize: 12,
-            letterSpacing: "0.12em",
+            background: "none",
+            border: "none",
+            padding: "6px 4px",
+            minHeight: 36,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            cursor: "pointer",
+            fontFamily: "inherit",
             color: C.mute,
-            fontWeight: 700,
-            textTransform: "uppercase",
           }}
         >
-          Savings
-        </div>
+          <span style={{ fontSize: 12, fontWeight: 700 }} aria-hidden>
+            {collapsed ? "▸" : "▾"}
+          </span>
+          <span
+            style={{
+              fontSize: 12,
+              letterSpacing: "0.12em",
+              fontWeight: 700,
+              textTransform: "uppercase",
+            }}
+          >
+            Savings
+          </span>
+          {list.length > 0 && (
+            <span style={{ fontSize: 11, fontWeight: 600, color: C.mute }}>
+              {list.length} bucket{list.length === 1 ? "" : "s"}
+              {collapsed
+                ? ` · $${fmt(list.reduce((s, b) => s + (Number(b.balance) || 0), 0))}`
+                : ""}
+            </span>
+          )}
+        </button>
         <button
           onClick={onManage}
           style={{
@@ -2491,7 +2727,7 @@ function SavingsSection({ savings, onManage, onBucketTap }) {
         </button>
       </div>
 
-      {list.length === 0 ? (
+      {collapsed ? null : list.length === 0 ? (
         <div
           onClick={onManage}
           role="button"
@@ -2510,7 +2746,8 @@ function SavingsSection({ savings, onManage, onBucketTap }) {
             cursor: "pointer",
           }}
         >
-          Track a savings bucket to see where it lands in 3 months. Deposits show as expenses on each applicable check.
+          Track savings buckets. Monthly = once per calendar month (handles 3-check months). Every
+          check = each paycheck.
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -2611,8 +2848,9 @@ function SavingsSheet({ savings, onSave, focusId }) {
     <div>
       <div style={sheetTitle}>Savings buckets</div>
       <div style={{ fontSize: 13, color: C.mute, marginBottom: 14, lineHeight: 1.45 }}>
-        Deposits show as expenses on each applicable check. Monthly hits every other biweekly check.
-        Borrowed is what you pulled out and still need to restore.
+        Deposits show on checks. Monthly = once per calendar month (first check that month, so
+        3-check months stay clean). Every check = each paycheck. ✕ a deposit on a check to remove
+        just that one.
       </div>
 
       {rows.length === 0 && (
@@ -2675,6 +2913,7 @@ function SavingsSheet({ savings, onSave, focusId }) {
             <CadenceToggle
               value={r.frequency || "biweekly"}
               onChange={(v) => setRow(r.id, "frequency", v)}
+              labels={{ biweekly: "Every check", monthly: "Once / month" }}
             />
             <div style={{ marginBottom: 8 }}>
               <div style={fieldLabel}>Borrowed (to restore)</div>
@@ -2770,6 +3009,16 @@ function AddItemSheet({
   const [splitCadence, setSplitCadence] = useState("biweekly");
   const [firstPayment, setFirstPayment] = useState("");
   const [categoryIds, setCategoryIds] = useState([]);
+  const [catsManual, setCatsManual] = useState(false);
+  const [autoTagged, setAutoTagged] = useState(false);
+
+  const applyName = (value) => {
+    setName(value);
+    if (catsManual) return;
+    const suggested = suggestCategoryIds(value, categories);
+    setCategoryIds(suggested);
+    setAutoTagged(suggested.length > 0);
+  };
 
   const costNum = Number(cost) || 0;
   const count = Math.max(2, Math.min(24, Math.floor(Number(splitCount) || 4)));
@@ -2805,7 +3054,7 @@ function AddItemSheet({
         style={input}
         autoFocus
         value={name}
-        onChange={(e) => setName(e.target.value)}
+        onChange={(e) => applyName(e.target.value)}
         placeholder="What is it?"
       />
       <input
@@ -2830,9 +3079,22 @@ function AddItemSheet({
       <CategoryPicker
         categories={categories}
         selectedIds={categoryIds}
-        onChange={setCategoryIds}
-        onCreate={onCreateCategory}
+        onChange={(ids) => {
+          setCatsManual(true);
+          setAutoTagged(false);
+          setCategoryIds(ids);
+        }}
+        onCreate={(n) => {
+          setCatsManual(true);
+          setAutoTagged(false);
+          return onCreateCategory(n);
+        }}
       />
+      {autoTagged && (
+        <div style={{ fontSize: 11, color: C.mute, marginTop: -6, marginBottom: 10 }}>
+          Auto-tagged from name
+        </div>
+      )}
 
       <button
         type="button"
@@ -3092,6 +3354,9 @@ function EditPaycheckSheet({ paycheck, idx, onSave }) {
   const checkIdx = idx >= 0 ? idx : 0;
   const initialDate = parsePayLabel(paycheck?.label, checkIdx);
   const [dateValue, setDateValue] = useState(() => toDateInputValue(initialDate));
+  const [extraIncome, setExtraIncome] = useState(
+    String(paycheck?.extraIncome ? paycheck.extraIncome : "")
+  );
   if (!paycheck) return null;
 
   const nextLabel = formatPayLabel(
@@ -3100,14 +3365,16 @@ function EditPaycheckSheet({ paycheck, idx, onSave }) {
       return new Date(y, m - 1, d);
     })()
   );
-  const dirty = nextLabel !== paycheck.label;
+  const nextIncome = Number(extraIncome) || 0;
+  const dirty =
+    nextLabel !== paycheck.label || nextIncome !== (Number(paycheck.extraIncome) || 0);
   const checkNum = checkIdx + 1;
 
   return (
     <div>
       <div style={sheetTitle}>Edit Check {checkNum}</div>
       <div style={{ fontSize: 13, color: C.mute, marginBottom: 12, lineHeight: 1.4 }}>
-        Pick the paycheck date. New checks still auto-add on the Jul 15 + 2 weeks schedule.
+        Set the pay date and any extra income (reimbursement, side hustle, etc.).
       </div>
       <div style={fieldLabel}>Pay date</div>
       <input
@@ -3121,16 +3388,24 @@ function EditPaycheckSheet({ paycheck, idx, onSave }) {
         Shows as{" "}
         <span style={{ color: C.accent, fontWeight: 700 }}>{nextLabel || "—"}</span>
       </div>
+      <div style={fieldLabel}>Extra income</div>
+      <input
+        style={input}
+        value={extraIncome}
+        onChange={(e) => setExtraIncome(e.target.value)}
+        inputMode="decimal"
+        placeholder="0 — reimbursement, bonus, etc."
+      />
       <button
         type="button"
         style={{ ...btnPrimary, opacity: dateValue && dirty ? 1 : 0.4 }}
         disabled={!dateValue || !dirty}
         onClick={() => {
           if (!dateValue) return;
-          onSave(nextLabel);
+          onSave(nextLabel, nextIncome);
         }}
       >
-        Save date
+        Save check
       </button>
     </div>
   );
